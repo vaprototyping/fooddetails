@@ -9,6 +9,7 @@ let currentSearchBucket = "";
 let currentSearchData = [];
 let currentProduct = null;
 let currentDetailsChunk = [];
+let currentChunkName = "";
 
 /* ----------------------------- */
 /* Helpers                       */
@@ -158,6 +159,8 @@ function renderSuggestions(matches) {
 
 async function loadProductDetails(code, chunk) {
   try {
+    currentChunkName = chunk;
+
     const response = await fetch(`${BASE_URL}/details/${chunk}`, {
       cache: "no-store"
     });
@@ -183,6 +186,7 @@ async function loadProductDetails(code, chunk) {
     console.error(error);
     currentProduct = null;
     currentDetailsChunk = [];
+    currentChunkName = "";
     resultBox.innerHTML = `<p>Error loading product details.</p>`;
   }
 }
@@ -212,7 +216,6 @@ function calculateMacroDistance(baseItem, candidate) {
 
   let distance = 0;
 
-  // kcal and protein slightly more important
   if (baseKcal !== null && candKcal !== null) distance += Math.abs(baseKcal - candKcal) * 0.08;
   if (baseFat !== null && candFat !== null) distance += Math.abs(baseFat - candFat) * 1.0;
   if (baseCarbs !== null && candCarbs !== null) distance += Math.abs(baseCarbs - candCarbs) * 1.0;
@@ -230,7 +233,7 @@ function getAlternativeFoods(baseItem, allItems) {
 
   const seenNames = new Set();
 
-  const candidates = allItems
+  return allItems
     .filter((item) => item.code !== baseItem.code)
     .filter((item) => item.group === baseItem.group)
     .filter((item) => item.product_name && item.product_name.trim() !== "")
@@ -247,13 +250,7 @@ function getAlternativeFoods(baseItem, allItems) {
     }))
     .sort((a, b) => a.distance - b.distance)
     .slice(0, 5);
-
-  return candidates;
 }
-
-/* ----------------------------- */
-/* Product rendering             */
-/* ----------------------------- */
 
 function renderAlternativeFoods(baseItem) {
   const alternatives = getAlternativeFoods(baseItem, currentDetailsChunk);
@@ -267,30 +264,16 @@ function renderAlternativeFoods(baseItem) {
   const links = alternatives
     .map((item) => {
       return `
-        <a href="#" class="alt-link" data-code="${escapeHtml(item.code)}" data-chunk="${escapeHtml(findCurrentChunkName())}">
+        <a href="#" class="alt-link" data-code="${escapeHtml(item.code)}" data-chunk="${escapeHtml(currentChunkName)}">
           ${escapeHtml(item.product_name)}
         </a>
       `;
     })
-    .join("<span class=\"alt-separator\"> • </span>");
+    .join(" • ");
 
   return `
-    <div class="alternatives-block">
-      <p class="small"><strong>Alternative foods:</strong></p>
-      <div class="alternatives-list">
-        ${links}
-      </div>
-    </div>
+    <p class="small"><strong>Alternative foods:</strong> ${links}</p>
   `;
-}
-
-function findCurrentChunkName() {
-  // the selected product is already loaded from one chunk
-  // all alternatives come from this same chunk
-  // we infer the chunk name from the search index when needed by reusing currentProduct search flow
-  // since we do not store it directly on the product object, we keep the current chunk implicit here
-  // we can safely use a temporary property if present
-  return currentProduct && currentProduct.__chunk ? currentProduct.__chunk : "";
 }
 
 function attachAlternativeClickHandlers() {
@@ -305,10 +288,8 @@ function attachAlternativeClickHandlers() {
 
       if (!code || !chunk) return;
 
-      // load exactly like a normal search result
       await loadProductDetails(code, chunk);
 
-      // move viewport to result card top
       const resultSection = document.getElementById("result");
       if (resultSection) {
         resultSection.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -316,6 +297,10 @@ function attachAlternativeClickHandlers() {
     });
   });
 }
+
+/* ----------------------------- */
+/* Product rendering             */
+/* ----------------------------- */
 
 function renderProduct(product) {
   const alternativesHtml = renderAlternativeFoods(product);
