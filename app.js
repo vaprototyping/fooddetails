@@ -8,6 +8,11 @@ const typeFilter = document.getElementById("type-filter");
 let currentSearchBucket = "";
 let currentSearchData = [];
 let currentProduct = null;
+let currentDetailsChunk = [];
+
+/* ----------------------------- */
+/* Helpers                       */
+/* ----------------------------- */
 
 function getLetterBucket(name) {
   if (!name) return "other";
@@ -18,24 +23,19 @@ function getLetterBucket(name) {
   return "other";
 }
 
-async function loadSearchBucket(bucket) {
-  if (bucket === currentSearchBucket) return;
+function formatValue(value, suffix = "") {
+  return value === null || value === undefined || value === ""
+    ? "—"
+    : `${value}${suffix}`;
+}
 
-  try {
-    const response = await fetch(`${BASE_URL}/search/${bucket}.json`);
-
-    if (!response.ok) {
-      throw new Error(`Failed to load search bucket ${bucket}: ${response.status}`);
-    }
-
-    currentSearchData = await response.json();
-    currentSearchBucket = bucket;
-    console.log(`Loaded bucket ${bucket}:`, currentSearchData.length);
-  } catch (error) {
-    console.error(error);
-    currentSearchData = [];
-    currentSearchBucket = "";
-  }
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
 function scoreMatch(item, query) {
@@ -53,6 +53,32 @@ function scoreMatch(item, query) {
   if (item.type === "generic") score += 10;
 
   return score;
+}
+
+/* ----------------------------- */
+/* Search bucket loading         */
+/* ----------------------------- */
+
+async function loadSearchBucket(bucket) {
+  if (bucket === currentSearchBucket) return;
+
+  try {
+    const response = await fetch(`${BASE_URL}/search/${bucket}.json`, {
+      cache: "no-store"
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to load search bucket ${bucket}: ${response.status}`);
+    }
+
+    currentSearchData = await response.json();
+    currentSearchBucket = bucket;
+    console.log(`Loaded bucket ${bucket}:`, currentSearchData.length);
+  } catch (error) {
+    console.error(error);
+    currentSearchData = [];
+    currentSearchBucket = "";
+  }
 }
 
 function getMatches(query) {
@@ -126,15 +152,23 @@ function renderSuggestions(matches) {
   suggestionsList.style.display = "block";
 }
 
+/* ----------------------------- */
+/* Product details loading       */
+/* ----------------------------- */
+
 async function loadProductDetails(code, chunk) {
   try {
-    const response = await fetch(`${BASE_URL}/details/${chunk}`);
+    const response = await fetch(`${BASE_URL}/details/${chunk}`, {
+      cache: "no-store"
+    });
 
     if (!response.ok) {
       throw new Error(`Failed to load details file ${chunk}: ${response.status}`);
     }
 
     const details = await response.json();
+    currentDetailsChunk = details;
+
     const product = details.find((item) => item.code === code);
 
     if (!product) {
@@ -148,26 +182,144 @@ async function loadProductDetails(code, chunk) {
   } catch (error) {
     console.error(error);
     currentProduct = null;
+    currentDetailsChunk = [];
     resultBox.innerHTML = `<p>Error loading product details.</p>`;
   }
 }
 
-function formatValue(value, suffix = "") {
-  return value === null || value === undefined || value === ""
-    ? "—"
-    : `${value}${suffix}`;
+/* ----------------------------- */
+/* Alternatives logic            */
+/* ----------------------------- */
+
+function safeNumber(value) {
+  return value === null || value === undefined || value === "" ? null : Number(value);
 }
 
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+function calculateMacroDistance(baseItem, candidate) {
+  const baseKcal = safeNumber(baseItem.kcal);
+  const baseFat = safeNumber(baseItem.fat);
+  const baseCarbs = safeNumber(baseItem.carbs);
+  const baseProtein = safeNumber(baseItem.protein);
+  const baseFiber = safeNumber(baseItem.fiber);
+  const baseSodium = safeNumber(baseItem.sodium);
+
+  const candKcal = safeNumber(candidate.kcal);
+  const candFat = safeNumber(candidate.fat);
+  const candCarbs = safeNumber(candidate.carbs);
+  const candProtein = safeNumber(candidate.protein);
+  const candFiber = safeNumber(candidate.fiber);
+  const candSodium = safeNumber(candidate.sodium);
+
+  let distance = 0;
+
+  // kcal and protein slightly more important
+  if (baseKcal !== null && candKcal !== null) distance += Math.abs(baseKcal - candKcal) * 0.08;
+  if (baseFat !== null && candFat !== null) distance += Math.abs(baseFat - candFat) * 1.0;
+  if (baseCarbs !== null && candCarbs !== null) distance += Math.abs(baseCarbs - candCarbs) * 1.0;
+  if (baseProtein !== null && candProtein !== null) distance += Math.abs(baseProtein - candProtein) * 1.2;
+  if (baseFiber !== null && candFiber !== null) distance += Math.abs(baseFiber - candFiber) * 0.6;
+  if (baseSodium !== null && candSodium !== null) distance += Math.abs(baseSodium - candSodium) * 0.2;
+
+  return distance;
+}
+
+function getAlternativeFoods(baseItem, allItems) {
+  if (!baseItem || !Array.isArray(allItems) || allItems.length === 0) {
+    return [];
+  }
+
+  const seenNames = new Set();
+
+  const candidates = allItems
+    .filter((item) => item.code !== baseItem.code)
+    .filter((item) => item.group === baseItem.group)
+    .filter((item) => item.product_name && item.product_name.trim() !== "")
+    .filter((item) => {
+      const normalized = item.product_name.trim().toLowerCase();
+      if (normalized === baseItem.product_name.trim().toLowerCase()) return false;
+      if (seenNames.has(normalized)) return false;
+      seenNames.add(normalized);
+      return true;
+    })
+    .map((item) => ({
+      ...item,
+      distance: calculateMacroDistance(baseItem, item)
+    }))
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, 5);
+
+  return candidates;
+}
+
+/* ----------------------------- */
+/* Product rendering             */
+/* ----------------------------- */
+
+function renderAlternativeFoods(baseItem) {
+  const alternatives = getAlternativeFoods(baseItem, currentDetailsChunk);
+
+  if (!alternatives.length) {
+    return `
+      <p class="small"><strong>Alternative foods:</strong> No close alternatives found in the current dataset chunk.</p>
+    `;
+  }
+
+  const links = alternatives
+    .map((item) => {
+      return `
+        <a href="#" class="alt-link" data-code="${escapeHtml(item.code)}" data-chunk="${escapeHtml(findCurrentChunkName())}">
+          ${escapeHtml(item.product_name)}
+        </a>
+      `;
+    })
+    .join("<span class=\"alt-separator\"> • </span>");
+
+  return `
+    <div class="alternatives-block">
+      <p class="small"><strong>Alternative foods:</strong></p>
+      <div class="alternatives-list">
+        ${links}
+      </div>
+    </div>
+  `;
+}
+
+function findCurrentChunkName() {
+  // the selected product is already loaded from one chunk
+  // all alternatives come from this same chunk
+  // we infer the chunk name from the search index when needed by reusing currentProduct search flow
+  // since we do not store it directly on the product object, we keep the current chunk implicit here
+  // we can safely use a temporary property if present
+  return currentProduct && currentProduct.__chunk ? currentProduct.__chunk : "";
+}
+
+function attachAlternativeClickHandlers() {
+  const links = document.querySelectorAll(".alt-link");
+
+  links.forEach((link) => {
+    link.addEventListener("click", async (event) => {
+      event.preventDefault();
+
+      const code = link.dataset.code;
+      const chunk = link.dataset.chunk;
+
+      if (!code || !chunk) return;
+
+      // load exactly like a normal search result
+      await loadProductDetails(code, chunk);
+
+      // move viewport to result card top
+      const resultSection = document.getElementById("result");
+      if (resultSection) {
+        resultSection.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    });
+  });
 }
 
 function renderProduct(product) {
+  const alternativesHtml = renderAlternativeFoods(product);
+
   resultBox.innerHTML = `
     <article class="card">
       <h2>${escapeHtml(product.product_name || "Unknown product")}</h2>
@@ -193,47 +345,16 @@ function renderProduct(product) {
       <p class="small"><strong>Unit:</strong> ${escapeHtml(product.unit || "g")} | <strong>Qty:</strong> ${product.qty ?? 100}</p>
       <p class="small"><strong>Notes:</strong> ${escapeHtml(product.notes || "—")}</p>
 
-      <button id="copy-btn" class="copy-btn" type="button">Copy for Nutrium</button>
+      ${alternativesHtml}
     </article>
   `;
 
-  const copyBtn = document.getElementById("copy-btn");
-  if (copyBtn) {
-    copyBtn.addEventListener("click", copyNutriumFormat);
-  }
+  attachAlternativeClickHandlers();
 }
 
-async function copyNutriumFormat() {
-  if (!currentProduct) return;
-
-  const text = [
-    `Name: ${currentProduct.product_name || ""}`,
-    `Group: ${currentProduct.group || ""}`,
-    `Type: ${currentProduct.type || ""}`,
-    `Unit: ${currentProduct.unit || "g"}`,
-    `Qty: ${currentProduct.qty ?? 100}`,
-    `kcal: ${currentProduct.kcal ?? ""}`,
-    `Fat: ${currentProduct.fat ?? ""}`,
-    `Carbs: ${currentProduct.carbs ?? ""}`,
-    `Protein: ${currentProduct.protein ?? ""}`,
-    `Fiber: ${currentProduct.fiber ?? ""}`,
-    `Sodium: ${currentProduct.sodium ?? ""}`,
-    `Brand: ${currentProduct.brand || ""}`,
-    `Country: ${currentProduct.country || ""}`,
-    `Serving size: ${currentProduct.serving_size || ""}`,
-    `Ingredients: ${currentProduct.ingredients || ""}`,
-    `Barcode: ${currentProduct.barcode || ""}`,
-    `Notes: ${currentProduct.notes || ""}`
-  ].join("\n");
-
-  try {
-    await navigator.clipboard.writeText(text);
-    alert("Copied for Nutrium.");
-  } catch (error) {
-    console.error(error);
-    alert("Copy failed.");
-  }
-}
+/* ----------------------------- */
+/* Input handlers                */
+/* ----------------------------- */
 
 async function handleSearchInput() {
   const query = searchInput.value.trim();
