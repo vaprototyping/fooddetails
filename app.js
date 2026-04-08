@@ -1,5 +1,6 @@
 const BASE_URL = "https://pub-ec7e75da12684e40b7b1178d5a2c05f4.r2.dev";
 
+
 const searchInput = document.getElementById("food-search");
 const suggestionsList = document.getElementById("suggestions");
 const resultBox = document.getElementById("result");
@@ -54,6 +55,10 @@ function scoreMatch(item, query) {
   if (item.type === "generic") score += 10;
 
   return score;
+}
+
+function safeNumber(value) {
+  return value === null || value === undefined || value === "" ? null : Number(value);
 }
 
 /* ----------------------------- */
@@ -192,27 +197,19 @@ async function loadProductDetails(code, chunk) {
 }
 
 /* ----------------------------- */
-/* Alternatives logic            */
+/* Macro alternatives logic      */
 /* ----------------------------- */
 
-function safeNumber(value) {
-  return value === null || value === undefined || value === "" ? null : Number(value);
-}
-
-function calculateMacroDistance(baseItem, candidate) {
+function overallMacroDistance(baseItem, candidate) {
   const baseKcal = safeNumber(baseItem.kcal);
   const baseFat = safeNumber(baseItem.fat);
   const baseCarbs = safeNumber(baseItem.carbs);
   const baseProtein = safeNumber(baseItem.protein);
-  const baseFiber = safeNumber(baseItem.fiber);
-  const baseSodium = safeNumber(baseItem.sodium);
 
   const candKcal = safeNumber(candidate.kcal);
   const candFat = safeNumber(candidate.fat);
   const candCarbs = safeNumber(candidate.carbs);
   const candProtein = safeNumber(candidate.protein);
-  const candFiber = safeNumber(candidate.fiber);
-  const candSodium = safeNumber(candidate.sodium);
 
   let distance = 0;
 
@@ -220,23 +217,35 @@ function calculateMacroDistance(baseItem, candidate) {
   if (baseFat !== null && candFat !== null) distance += Math.abs(baseFat - candFat) * 1.0;
   if (baseCarbs !== null && candCarbs !== null) distance += Math.abs(baseCarbs - candCarbs) * 1.0;
   if (baseProtein !== null && candProtein !== null) distance += Math.abs(baseProtein - candProtein) * 1.2;
-  if (baseFiber !== null && candFiber !== null) distance += Math.abs(baseFiber - candFiber) * 0.6;
-  if (baseSodium !== null && candSodium !== null) distance += Math.abs(baseSodium - candSodium) * 0.2;
 
   return distance;
 }
 
-function getAlternativeFoods(baseItem, allItems) {
-  if (!baseItem || !Array.isArray(allItems) || allItems.length === 0) {
+function macroSpecificDistance(baseItem, candidate, macroKey) {
+  const baseValue = safeNumber(baseItem[macroKey]);
+  const candidateValue = safeNumber(candidate[macroKey]);
+
+  if (baseValue === null || candidateValue === null) return Number.POSITIVE_INFINITY;
+
+  const primaryDistance = Math.abs(baseValue - candidateValue);
+  const secondaryDistance = overallMacroDistance(baseItem, candidate);
+
+  // prioritize the selected macro heavily, then use overall profile as tie-breaker
+  return (primaryDistance * 5) + secondaryDistance;
+}
+
+function getMacroAlternatives(baseItem, macroKey, maxItems = 10) {
+  if (!baseItem || !Array.isArray(currentDetailsChunk) || currentDetailsChunk.length === 0) {
     return [];
   }
 
   const seenNames = new Set();
 
-  return allItems
+  const sameGroupCandidates = currentDetailsChunk
     .filter((item) => item.code !== baseItem.code)
-    .filter((item) => item.group === baseItem.group)
     .filter((item) => item.product_name && item.product_name.trim() !== "")
+    .filter((item) => item.group === baseItem.group)
+    .filter((item) => safeNumber(item[macroKey]) !== null)
     .filter((item) => {
       const normalized = item.product_name.trim().toLowerCase();
       if (normalized === baseItem.product_name.trim().toLowerCase()) return false;
@@ -246,22 +255,46 @@ function getAlternativeFoods(baseItem, allItems) {
     })
     .map((item) => ({
       ...item,
-      distance: calculateMacroDistance(baseItem, item)
+      distance: macroSpecificDistance(baseItem, item, macroKey)
     }))
-    .sort((a, b) => a.distance - b.distance)
-    .slice(0, 5);
+    .sort((a, b) => a.distance - b.distance);
+
+  // If same-group results are too few, fill the remainder from other groups in the same chunk
+  if (sameGroupCandidates.length < 5) {
+    const sameGroupNames = new Set(sameGroupCandidates.map(item => item.product_name.trim().toLowerCase()));
+
+    const fallbackCandidates = currentDetailsChunk
+      .filter((item) => item.code !== baseItem.code)
+      .filter((item) => item.product_name && item.product_name.trim() !== "")
+      .filter((item) => safeNumber(item[macroKey]) !== null)
+      .filter((item) => {
+        const normalized = item.product_name.trim().toLowerCase();
+        if (normalized === baseItem.product_name.trim().toLowerCase()) return false;
+        if (sameGroupNames.has(normalized)) return false;
+        return true;
+      })
+      .map((item) => ({
+        ...item,
+        distance: macroSpecificDistance(baseItem, item, macroKey)
+      }))
+      .sort((a, b) => a.distance - b.distance);
+
+    return [...sameGroupCandidates, ...fallbackCandidates].slice(0, maxItems);
+  }
+
+  return sameGroupCandidates.slice(0, maxItems);
 }
 
-function renderAlternativeFoods(baseItem) {
-  const alternatives = getAlternativeFoods(baseItem, currentDetailsChunk);
+function renderAlternativeList(title, macroKey, baseItem) {
+  const items = getMacroAlternatives(baseItem, macroKey, 10);
 
-  if (!alternatives.length) {
+  if (!items.length) {
     return `
-      <p class="small"><strong>Alternative foods:</strong> No close alternatives found in the current dataset chunk.</p>
+      <p class="small"><strong>${title}:</strong> No suitable matches found.</p>
     `;
   }
 
-  const links = alternatives
+  const links = items
     .map((item) => {
       return `
         <a href="#" class="alt-link" data-code="${escapeHtml(item.code)}" data-chunk="${escapeHtml(currentChunkName)}">
@@ -272,7 +305,7 @@ function renderAlternativeFoods(baseItem) {
     .join(" • ");
 
   return `
-    <p class="small"><strong>Alternative foods:</strong> ${links}</p>
+    <p class="small"><strong>${title}:</strong> ${links}</p>
   `;
 }
 
@@ -303,7 +336,9 @@ function attachAlternativeClickHandlers() {
 /* ----------------------------- */
 
 function renderProduct(product) {
-  const alternativesHtml = renderAlternativeFoods(product);
+  const proteinAlternatives = renderAlternativeList("Alternative Protein", "protein", product);
+  const carbsAlternatives = renderAlternativeList("Alternative Carbs", "carbs", product);
+  const fatAlternatives = renderAlternativeList("Alternative Fat", "fat", product);
 
   resultBox.innerHTML = `
     <article class="card">
@@ -330,7 +365,9 @@ function renderProduct(product) {
       <p class="small"><strong>Unit:</strong> ${escapeHtml(product.unit || "g")} | <strong>Qty:</strong> ${product.qty ?? 100}</p>
       <p class="small"><strong>Notes:</strong> ${escapeHtml(product.notes || "—")}</p>
 
-      ${alternativesHtml}
+      ${proteinAlternatives}
+      ${carbsAlternatives}
+      ${fatAlternatives}
     </article>
   `;
 
