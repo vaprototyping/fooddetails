@@ -343,6 +343,68 @@
       letter-spacing: -0.04em;
     }
 
+    .result-header-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .view-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255,255,255,0.94);
+    }
+
+    .view-toggle-btn {
+      min-height: 40px;
+      border: none;
+      border-radius: 999px;
+      padding: 0 16px;
+      background: transparent;
+      color: var(--muted);
+      font-family: inherit;
+      font-size: 0.92rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease;
+    }
+
+    .view-toggle-btn:hover {
+      transform: translateY(-1px);
+    }
+
+    .view-toggle-btn.active {
+      background: linear-gradient(180deg, var(--accent), #59c3b9);
+      color: #fff;
+      box-shadow: 0 8px 18px rgba(99, 203, 193, 0.22);
+    }
+
+    .portion-summary {
+      margin: 10px 0 0;
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: linear-gradient(180deg, #f8fbfb, #f2f8f8);
+      color: var(--text);
+      line-height: 1.6;
+    }
+
+    .portion-summary strong {
+      color: var(--accent-dark);
+    }
+
+    .portion-note {
+      color: var(--muted);
+      margin-top: 8px;
+      font-size: 0.92rem;
+    }
+
     .result:empty::before {
       content: "Search a food to see a detailed nutrition card here.";
       display: block;
@@ -434,6 +496,10 @@
         align-items: flex-start;
       }
 
+      .result-header-actions {
+        justify-content: flex-start;
+      }
+
       .grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
@@ -523,7 +589,19 @@
           <p class="eyebrow">RESULT</p>
           <h2 class="section-title">Selected food</h2>
         </div>
-        <div class="result-pill">Per 100 g view</div>
+
+        <div class="result-header-actions">
+          <div id="view-mode-pill" class="result-pill">Per 100 g view</div>
+
+          <div class="view-toggle" role="group" aria-label="Nutrition display mode">
+            <button id="view-100g" class="view-toggle-btn active" type="button">
+              Per 100g
+            </button>
+            <button id="view-portion" class="view-toggle-btn" type="button">
+              Per Portion
+            </button>
+          </div>
+        </div>
       </div>
 
       <section id="result" class="result"></section>
