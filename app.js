@@ -1,16 +1,31 @@
 const BASE_URL = "https://pub-ec7e75da12684e40b7b1178d5a2c05f4.r2.dev";
 
+const EXCHANGE_TARGETS = {
+  protein: 7,
+  carbs: 15,
+  fat: 5
+};
+
+const MIN_PORTION_GRAMS = 5;
+const MAX_PORTION_GRAMS = 400;
+const DOMINANCE_RATIO = 1.1;
 
 const searchInput = document.getElementById("food-search");
 const suggestionsList = document.getElementById("suggestions");
 const resultBox = document.getElementById("result");
 const typeFilter = document.getElementById("type-filter");
 
+const view100gBtn = document.getElementById("view-100g");
+const viewPortionBtn = document.getElementById("view-portion");
+const viewModePill = document.getElementById("view-mode-pill");
+
 let currentSearchBucket = "";
 let currentSearchData = [];
 let currentProduct = null;
 let currentDetailsChunk = [];
 let currentChunkName = "";
+let currentViewMode = "100g";
+const portionCache = new Map();
 
 /* ----------------------------- */
 /* Helpers                       */
@@ -26,9 +41,19 @@ function getLetterBucket(name) {
 }
 
 function formatValue(value, suffix = "") {
-  return value === null || value === undefined || value === ""
+  return value === null || value === undefined || value === "" || Number.isNaN(Number(value))
     ? "—"
-    : `${value}${suffix}`;
+    : `${formatNumber(value)}${suffix}`;
+}
+
+function formatNumber(value, decimals = 1) {
+  if (value === null || value === undefined || value === "" || Number.isNaN(Number(value))) {
+    return "—";
+  }
+
+  const numeric = Number(value);
+  if (Number.isInteger(numeric)) return String(numeric);
+  return numeric.toFixed(decimals).replace(/\.0$/, "");
 }
 
 function escapeHtml(value) {
@@ -58,7 +83,217 @@ function scoreMatch(item, query) {
 }
 
 function safeNumber(value) {
-  return value === null || value === undefined || value === "" ? null : Number(value);
+  if (value === null || value === undefined || value === "") return null;
+  const numeric = Number(value);
+  return Number.isNaN(numeric) ? null : numeric;
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function getProductCacheKey(product) {
+  return `${product.code || "unknown"}::${product.product_name || "unknown"}`;
+}
+
+function calculateScaledValue(valuePer100g, grams) {
+  const numeric = safeNumber(valuePer100g);
+  if (numeric === null) return null;
+  return (numeric / 100) * grams;
+}
+
+/* ----------------------------- */
+/* Food exchange logic           */
+/* ----------------------------- */
+
+function getFoodCategory(food) {
+  const protein = safeNumber(food.protein) || 0;
+  const carbs = safeNumber(food.carbs) || 0;
+  const fat = safeNumber(food.fat) || 0;
+
+  const macros = [
+    { key: "protein", value: protein, label: "Protein" },
+    { key: "carbs", value: carbs, label: "Carb" },
+    { key: "fat", value: fat, label: "Fat" }
+  ].sort((a, b) => b.value - a.value);
+
+  const dominant = macros[0];
+  const runnerUp = macros[1];
+
+  if (dominant.value <= 0) {
+    return {
+      key: null,
+      label: "Mixed",
+      confidence: "none"
+    };
+  }
+
+  if (runnerUp.value === 0 || dominant.value >= runnerUp.value * DOMINANCE_RATIO) {
+    return {
+      key: dominant.key,
+      label: dominant.label,
+      confidence: "dominant"
+    };
+  }
+
+  return {
+    key: dominant.key,
+    label: `${dominant.label} (mixed)`,
+    confidence: "mixed"
+  };
+}
+
+function calculatePortionSize(food) {
+  const category = getFoodCategory(food);
+
+  if (!category.key) {
+    return {
+      portionGrams: null,
+      category,
+      reason: "No usable macro values"
+    };
+  }
+
+  const macroValue = safeNumber(food[category.key]);
+
+  if (macroValue === null || macroValue <= 0) {
+    return {
+      portionGrams: null,
+      category,
+      reason: "Dominant macro missing or zero"
+    };
+  }
+
+  const target = EXCHANGE_TARGETS[category.key];
+  const rawPortionGrams = (target / macroValue) * 100;
+  const portionGrams = clamp(rawPortionGrams, MIN_PORTION_GRAMS, MAX_PORTION_GRAMS);
+
+  return {
+    portionGrams,
+    rawPortionGrams,
+    category,
+    target,
+    wasClamped: portionGrams !== rawPortionGrams
+  };
+}
+
+function calculatePerPortionValues(food) {
+  const portionInfo = calculatePortionSize(food);
+
+  if (!portionInfo.portionGrams) {
+    return {
+      portionInfo,
+      values: null
+    };
+  }
+
+  const grams = portionInfo.portionGrams;
+
+  return {
+    portionInfo,
+    values: {
+      kcal: calculateScaledValue(food.kcal, grams),
+      fat: calculateScaledValue(food.fat, grams),
+      carbs: calculateScaledValue(food.carbs, grams),
+      protein: calculateScaledValue(food.protein, grams),
+      fiber: calculateScaledValue(food.fiber, grams),
+      sodium: calculateScaledValue(food.sodium, grams)
+    }
+  };
+}
+
+function getComputedNutritionView(product) {
+  const cacheKey = getProductCacheKey(product);
+
+  if (portionCache.has(cacheKey)) {
+    return portionCache.get(cacheKey);
+  }
+
+  const computed = calculatePerPortionValues(product);
+  portionCache.set(cacheKey, computed);
+  return computed;
+}
+
+function getDisplayValues(product) {
+  if (currentViewMode === "100g") {
+    return {
+      mode: "100g",
+      label: "Per 100 g",
+      pill: "Per 100 g view",
+      portionInfo: null,
+      values: {
+        kcal: safeNumber(product.kcal),
+        fat: safeNumber(product.fat),
+        carbs: safeNumber(product.carbs),
+        protein: safeNumber(product.protein),
+        fiber: safeNumber(product.fiber),
+        sodium: safeNumber(product.sodium)
+      }
+    };
+  }
+
+  const computed = getComputedNutritionView(product);
+
+  if (!computed.values || !computed.portionInfo.portionGrams) {
+    return {
+      mode: "portion",
+      label: "Per portion",
+      pill: "Per portion view",
+      portionInfo: computed.portionInfo,
+      values: null
+    };
+  }
+
+  return {
+    mode: "portion",
+    label: "Per portion",
+    pill: "Per portion view",
+    portionInfo: computed.portionInfo,
+    values: computed.values
+  };
+}
+
+function renderPortionSummary(displayData) {
+  if (displayData.mode !== "portion") return "";
+
+  const portionInfo = displayData.portionInfo;
+
+  if (!portionInfo || !portionInfo.portionGrams) {
+    return `
+      <div class="portion-summary">
+        <strong>Portion unavailable.</strong>
+        <div class="portion-note">This food does not have enough macro data to calculate a reliable exchange portion.</div>
+      </div>
+    `;
+  }
+
+  const macroTypeLabel = `${portionInfo.category.label} portion`;
+  const clampedNote = portionInfo.wasClamped
+    ? `<div class="portion-note">Portion size was capped to keep the serving within a practical display range.</div>`
+    : "";
+
+  return `
+    <div class="portion-summary">
+      <strong>1 portion = ${formatNumber(portionInfo.portionGrams, 1)} g</strong><br>
+      Exchange type: ${escapeHtml(macroTypeLabel)}<br>
+      Based on target: ${formatNumber(portionInfo.target, 1)} g ${escapeHtml(portionInfo.category.key)}
+      ${clampedNote}
+    </div>
+  `;
+}
+
+function updateViewToggleUi() {
+  if (view100gBtn) {
+    view100gBtn.classList.toggle("active", currentViewMode === "100g");
+  }
+
+  if (viewPortionBtn) {
+    viewPortionBtn.classList.toggle("active", currentViewMode === "portion");
+  }
+
+  if (viewModePill) {
+    viewModePill.textContent = currentViewMode === "100g" ? "Per 100 g view" : "Per portion view";
+  }
 }
 
 /* ----------------------------- */
@@ -230,7 +465,6 @@ function macroSpecificDistance(baseItem, candidate, macroKey) {
   const primaryDistance = Math.abs(baseValue - candidateValue);
   const secondaryDistance = overallMacroDistance(baseItem, candidate);
 
-  // prioritize the selected macro heavily, then use overall profile as tie-breaker
   return (primaryDistance * 5) + secondaryDistance;
 }
 
@@ -259,9 +493,8 @@ function getMacroAlternatives(baseItem, macroKey, maxItems = 10) {
     }))
     .sort((a, b) => a.distance - b.distance);
 
-  // If same-group results are too few, fill the remainder from other groups in the same chunk
   if (sameGroupCandidates.length < 5) {
-    const sameGroupNames = new Set(sameGroupCandidates.map(item => item.product_name.trim().toLowerCase()));
+    const sameGroupNames = new Set(sameGroupCandidates.map((item) => item.product_name.trim().toLowerCase()));
 
     const fallbackCandidates = currentDetailsChunk
       .filter((item) => item.code !== baseItem.code)
@@ -340,6 +573,9 @@ function renderProduct(product) {
   const carbsAlternatives = renderAlternativeList("Alternative Carbs", "carbs", product);
   const fatAlternatives = renderAlternativeList("Alternative Fat", "fat", product);
 
+  const displayData = getDisplayValues(product);
+  const values = displayData.values;
+
   resultBox.innerHTML = `
     <article class="card">
       <h2>${escapeHtml(product.product_name || "Unknown product")}</h2>
@@ -353,16 +589,22 @@ function renderProduct(product) {
       <p class="meta"><strong>Type:</strong> ${escapeHtml(product.type || "—")}</p>
       <p class="meta"><strong>Quality score:</strong> ${product.quality_score ?? "—"}</p>
 
+      ${renderPortionSummary(displayData)}
+
       <div class="grid">
-        <div><strong>Energy</strong><br>${formatValue(product.kcal, " kcal")}</div>
-        <div><strong>Fat</strong><br>${formatValue(product.fat, " g")}</div>
-        <div><strong>Carbohydrates</strong><br>${formatValue(product.carbs, " g")}</div>
-        <div><strong>Protein</strong><br>${formatValue(product.protein, " g")}</div>
-        <div><strong>Fiber</strong><br>${formatValue(product.fiber, " g")}</div>
-        <div><strong>Sodium</strong><br>${formatValue(product.sodium, " g")}</div>
+        <div><strong>Energy</strong><br>${values ? formatValue(values.kcal, " kcal") : "—"}</div>
+        <div><strong>Fat</strong><br>${values ? formatValue(values.fat, " g") : "—"}</div>
+        <div><strong>Carbohydrates</strong><br>${values ? formatValue(values.carbs, " g") : "—"}</div>
+        <div><strong>Protein</strong><br>${values ? formatValue(values.protein, " g") : "—"}</div>
+        <div><strong>Fiber</strong><br>${values ? formatValue(values.fiber, " g") : "—"}</div>
+        <div><strong>Sodium</strong><br>${values ? formatValue(values.sodium, " g") : "—"}</div>
       </div>
 
-      <p class="small"><strong>Unit:</strong> ${escapeHtml(product.unit || "g")} | <strong>Qty:</strong> ${product.qty ?? 100}</p>
+      <p class="small">
+        <strong>Display:</strong> ${escapeHtml(displayData.label)}
+        ${displayData.mode === "100g" ? ` | <strong>Unit:</strong> ${escapeHtml(product.unit || "g")} | <strong>Qty:</strong> ${product.qty ?? 100}` : ""}
+      </p>
+
       <p class="small"><strong>Notes:</strong> ${escapeHtml(product.notes || "—")}</p>
 
       ${proteinAlternatives}
@@ -371,6 +613,7 @@ function renderProduct(product) {
     </article>
   `;
 
+  updateViewToggleUi();
   attachAlternativeClickHandlers();
 }
 
@@ -394,11 +637,32 @@ async function handleSearchInput() {
   renderSuggestions(matches);
 }
 
+function setViewMode(mode) {
+  if (mode !== "100g" && mode !== "portion") return;
+
+  currentViewMode = mode;
+  updateViewToggleUi();
+
+  if (currentProduct) {
+    renderProduct(currentProduct);
+  }
+}
+
 searchInput.addEventListener("input", handleSearchInput);
 typeFilter.addEventListener("change", handleSearchInput);
+
+if (view100gBtn) {
+  view100gBtn.addEventListener("click", () => setViewMode("100g"));
+}
+
+if (viewPortionBtn) {
+  viewPortionBtn.addEventListener("click", () => setViewMode("portion"));
+}
 
 document.addEventListener("click", (event) => {
   if (!event.target.closest(".search-wrapper")) {
     suggestionsList.style.display = "none";
   }
 });
+
+updateViewToggleUi();
